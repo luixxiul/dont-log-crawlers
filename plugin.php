@@ -2,13 +2,19 @@
 /**
 Plugin Name: Don't Log Crawlers
 Plugin URI: https://github.com/luixxiul/dont-log-crawlers
-Description: Prevents YOURLS from counting clicks of crawlers & bots with specific User Agent strings
-Version: 1.2
-Author: Suguru Hirahara
+Description: Prevents YOURLS from counting clicks of crawlers & bots with specific User Agent strings or CIDRs/IP addresses (hardcoded or obtained from a `whois` lookup on an ASN).
+Version: 1.3
+Author: Suguru Hirahara, Rich Christiansen
 Author URI: http://www.philosophyguides.org
 **/
 
-function dlb_is_crawler() {
+define("DLB_BLACKLISTED_ASNS", "32934"); //ASN stands for "Autonomous System Number". These should be provided as a comma-separated string. 32934 is the ASN for Facebook.
+define("DLB_BLACKLISTED_CIDRS", "");     //Comma-separated CIDRs. To blacklist a specific IP address, use the "/32" mask (e.g. "192.168.56.123/32" will blacklist "192.168.56.123").
+define("DLB_WHOIS_TTL", 86400);          //The amount of time (in seconds) that whois information stored in our DB should be considered valid. 86400 = 24 hours in seconds.
+
+define("DLB_OPTION_PREFIX", "dlb");
+
+function dlb_has_crawler_user_agent() {
     
     //set to 1 to be more agressive in filtering
     //adds 'curl', wget', 'ruby' and 'bot'
@@ -255,12 +261,68 @@ function dlb_is_crawler() {
     return $is_crawler;
 }
 
+function dlb_is_blacklisted() {
+	require_once("lib/php-cidr-match/CIDRmatch/CIDRmatch.php");
+
+	$ip = $_SERVER["REMOTE_ADDR"];
+	$cidrs = dlb_get_cidrs();
+	
+	$cidrMatch = new CIDRmatch\CIDRmatch();
+
+	foreach($cidrs as $cidr) {
+		if($cidrMatch->match($ip, $cidr)) {
+			// die("$ip is in $cidr");
+			return true;
+		}
+	}
+	
+	// die("$ip is not blacklisted");
+	return false;
+}
+
+function dlb_get_cidrs() {
+	global $ydb;
+  $options = new \YOURLS\Database\Options($ydb);
+	
+	$last_updated = intval($options->get(DLB_OPTION_PREFIX . "_whois_last_updated", null));
+	
+	if($last_updated === null || $last_updated + DLB_WHOIS_TTL < time()) {
+		dlb_update_whois();
+	}
+
+	return array_filter(array_merge(
+		$options->get(DLB_OPTION_PREFIX . "_blacklisted_cidrs", null), //Blacklisted CIDRs from the DB (prior ASN whois lookups)
+		array_map("trim", explode(",", DLB_BLACKLISTED_CIDRS))         //Blacklisted CIDRs (hardcoded)
+	));
+}
+
+function dlb_update_whois() {
+	global $ydb;
+  $options = new \YOURLS\Database\Options($ydb);
+
+	$asns = array_filter(array_map("trim", explode(",", DLB_BLACKLISTED_ASNS))); //Explode on commas and trim all values.
+	$cidrs = array();
+	
+	foreach($asns as $asn) {
+		exec("whois -h whois.radb.net -- '-i origin AS{$asn}'", $whois_data, $rval); //See https://stackoverflow.com/a/19542151/114558. TODO: Should probably have a timeout. Also, error checking could be improved.
+		//Just return if there was a problem executing `whois` (e.g. if the binary isn't present)
+		if(!empty($rval)) {
+			return;
+		}
+		preg_match_all("/route:\s*(.+)/", implode("\n", $whois_data), $matches); //Regex for IPv4 addresses only.
+		$cidrs = array_merge($cidrs, $matches[1]);
+	}
+	
+	$options->update(DLB_OPTION_PREFIX . "_whois_last_updated", time());
+	$options->update(DLB_OPTION_PREFIX . "_blacklisted_cidrs", $cidrs);
+}
+
 // Hook stuff in
 yourls_add_filter( 'shunt_update_clicks','dlb_skip_if_crawler' );
 yourls_add_filter( 'shunt_log_redirect','dlb_skip_if_crawler' );
 
 // Skip if crawler
 function dlb_skip_if_crawler() {
-    return dlb_is_crawler();
+    return dlb_has_crawler_user_agent() || dlb_is_blacklisted();
     // if anything but false is returned, functions using the two shunt_* filters will be short-circuited
 }
