@@ -291,7 +291,7 @@ function dlb_get_cidrs() {
 	}
 
 	return array_filter(array_merge(
-		$options->get(DLB_OPTION_PREFIX . "_blacklisted_cidrs", null), //Blacklisted CIDRs from the DB (prior ASN whois lookups)
+		$options->get(DLB_OPTION_PREFIX . "_blacklisted_cidrs", array()), //Blacklisted CIDRs from the DB (prior ASN whois lookups)
 		array_map("trim", explode(",", DLB_BLACKLISTED_CIDRS))         //Blacklisted CIDRs (hardcoded)
 	));
 }
